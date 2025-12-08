@@ -1,0 +1,9 @@
+{
+  "ticker": "GOOGL",
+  "sector": "Technology",
+  "keywords_positive": ["growth", "acquisition", "search market share", "youtube", "android", "innovation"],
+  "keywords_negative": ["antitrust", "privacy", "regulation", "lawsuit", "competition", "yahoo", "microsoft"],
+  "keywords_macro_fear": ["recession", "housing bubble", "subprime", "inflation", "fed rates"],
+  "correlated_assets": ["MSFT", "YHOO", "^IXIC"],
+  "inverse_assets": ["^VIX", "GLD"]
+}

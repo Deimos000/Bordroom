@@ -1,0 +1,12 @@
+pandas
+numpy
+yfinance
+pandas-datareader
+tensorflow
+scikit-learn
+xgboost
+transformers
+torch
+streamlit
+requests
+beautifulsoup4
