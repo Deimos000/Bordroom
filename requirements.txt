@@ -1,0 +1,37 @@
+# --- CORE DATA & MATH ---
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+pyarrow>=12.0.0      # <--- ADDED (Required for .parquet files)
+fastparquet>=2023.0.0 # <--- ADDED (Alternative engine)
+
+# --- FINANCIAL DATA MINING ---
+yfinance>=0.2.28
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+trafilatura>=1.6.0  # Essential for extracting text from HTML
+html5lib>=1.1
+
+# --- AGENTIC SEARCH & PARSING ---
+duckduckgo-search>=6.0.0
+rapidfuzz>=3.0.0    # For fuzzy entity matching (Apple vs Apple Inc)
+
+# --- DEEP LEARNING (The Brain) ---
+# Note: PyTorch is best installed via the direct command, but listed here for dependency checks
+torch>=2.0.0
+torch-geometric>=2.3.0
+
+# --- LOCAL AI & MEMORY (The Mind) ---
+ollama>=0.1.0       # Client to talk to local models
+chromadb>=0.4.0     # Vector Database
+sentence-transformers>=2.2.2  # Local Embedding models
+json_repair>=0.10.0 # Robust JSON parsing for LLM outputs
+tokenizers>=0.13.0
+
+# --- UTILITIES ---
+tqdm>=4.65.0        # Progress bars
+networkx>=3.1       # Graph algorithms (PageRank, Centrality)

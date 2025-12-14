@@ -1,0 +1,44 @@
+[2025-12-09 03:12:32] ============================================================
+[2025-12-09 03:12:32] AGENT INITIALIZED: Smart Math Agent (Level 6)
+[2025-12-09 03:12:32] Graph Depth: 5 neighbors
+[2025-12-09 03:12:32] ============================================================
+[2025-12-09 03:12:32] TRAINING STARTING...
+[2025-12-09 03:12:32] ENGINEERING: Processing 2014 rows of data (Training=True)...
+[2025-12-09 03:12:44]    Stats: Avg Hurst=0.50, Avg Entropy=2.39
+[2025-12-09 03:12:44] DISCOVERY: Scanning universe of 16 assets...
+[2025-12-09 03:12:44] DISCOVERY: Found 5 significant relationships.
+[2025-12-09 03:12:44]    -> Peer: GOOGL | Corr: 1.000 | Type: Co-movement (p=1.000)
+[2025-12-09 03:12:44]    -> Peer: QQQ | Corr: 0.824 | Type: Lead (p=0.026)
+[2025-12-09 03:12:44]    -> Peer: MSFT | Corr: 0.753 | Type: Lead (p=0.001)
+[2025-12-09 03:12:44]    -> Peer: SPY | Corr: 0.753 | Type: Lead (p=0.000)
+[2025-12-09 03:12:44]    -> Peer: DIA | Corr: 0.669 | Type: Lead (p=0.000)
+[2025-12-09 03:12:44]    Network: Peer features calculated successfully.
+[2025-12-09 03:12:44]    Cleanup: Dropped 19 rows due to NaN (Rolling windows). Final Size: 1995
+[2025-12-09 03:12:44] TRAINING: Using Features: ['Hurst', 'Entropy', 'RSI', 'BB_Width', 'Log_Ret', 'Peer_Momentum', 'Peer_Lagged_Impact']
+[2025-12-09 03:12:44]    Training Horizon: 1_Day (1 days ahead)
+[2025-12-09 03:12:47]    Training Horizon: 1_Week (5 days ahead)
+[2025-12-09 03:12:50]    Training Horizon: 1_Month (21 days ahead)
+[2025-12-09 03:12:52]    Training Horizon: 1_Year (252 days ahead)
+[2025-12-09 03:12:55] SYSTEM: Brain saved to models/math_test/brain_level6.pkl
+[2025-12-09 03:12:55] TRAINING COMPLETE. Brain saved.
+[2025-12-09 03:12:55] PREDICTION REQUEST (Stress Test=False)...
+[2025-12-09 03:12:55] ENGINEERING: Processing 2014 rows of data (Training=False)...
+[2025-12-09 03:13:06]    Stats: Avg Hurst=0.50, Avg Entropy=2.39
+[2025-12-09 03:13:06]    Network: Peer features calculated successfully.
+[2025-12-09 03:13:06]    Cleanup: Dropped 19 rows due to NaN (Rolling windows). Final Size: 1995
+[2025-12-09 03:13:06]    Base Price: 87.62564086914062
+[2025-12-09 03:13:06]    [1_Day] Median: 87.75 | 99% Cone: [np.float64(82.89), np.float64(92.69)]
+[2025-12-09 03:13:06]    [1_Week] Median: 88.55 | 99% Cone: [np.float64(78.74), np.float64(96.47)]
+[2025-12-09 03:13:06]    [1_Month] Median: 88.49 | 99% Cone: [np.float64(72.9), np.float64(102.11)]
+[2025-12-09 03:13:06]    [1_Year] Median: 112.27 | 99% Cone: [np.float64(72.65), np.float64(168.16)]
+[2025-12-09 03:13:06] PREDICTION REQUEST (Stress Test=True)...
+[2025-12-09 03:13:06] ENGINEERING: Processing 2014 rows of data (Training=False)...
+[2025-12-09 03:13:18]    Stats: Avg Hurst=0.50, Avg Entropy=2.39
+[2025-12-09 03:13:18]    Network: Peer features calculated successfully.
+[2025-12-09 03:13:18]    Cleanup: Dropped 19 rows due to NaN (Rolling windows). Final Size: 1995
+[2025-12-09 03:13:18]    ⚠️ ACTIVATING STRESS TEST SCENARIO ⚠️
+[2025-12-09 03:13:18]    Base Price: 87.62564086914062
+[2025-12-09 03:13:18]    [1_Day] Median: 87.55 | 99% Cone: [np.float64(81.87), np.float64(94.24)]
+[2025-12-09 03:13:18]    [1_Week] Median: 86.0 | 99% Cone: [np.float64(78.66), np.float64(97.92)]
+[2025-12-09 03:13:18]    [1_Month] Median: 84.42 | 99% Cone: [np.float64(75.44), np.float64(96.4)]
+[2025-12-09 03:13:18]    [1_Year] Median: 112.77 | 99% Cone: [np.float64(73.04), np.float64(166.1)]

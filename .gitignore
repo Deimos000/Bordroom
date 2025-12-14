@@ -1,0 +1,28 @@
+# MacOS / Linux / Git Bash
+cat <<EOT >> .gitignore
+# Python
+__pycache__/
+*.pyc
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Project Data (Do NOT push these)
+data/
+cache_data/
+brain_vectors/
+logs/
+
+# Trained Models (Too large for standard Git)
+models/
+*.pth
+*.pt
+*.pkl
+
+# IDE settings
+.vscode/
+.idea/
+.DS_Store
+EOT
