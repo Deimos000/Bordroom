@@ -7,7 +7,6 @@ import ssl
 import random
 import requests
 import warnings
-import traceback
 import joblib
 import numpy as np
 import pandas as pd
@@ -34,17 +33,17 @@ except AttributeError:
 CONFIG = {
     "LOOKBACK": 252,          # 1 Year Context
     "PREDICT_HORIZONS": [1, 5, 20, 252], # 1d, 1w, 1m, 1y
-    "FEATURES": 18,           # Tech(6) + FFT(3) + Fund(6) + LongTerm(3)
+    "FEATURES": 15,           # Tech(6) + FFT(3) + Fund(6)
     "HIDDEN_DIM": 256,
     "LAYERS": 6,
     "HEADS": 8,
     "DROPOUT": 0.1,
-    "BATCH_SIZE": 2048,
-    "EPOCHS": 500,            # High ceiling for deep learning
-    "LR": 3e-4,
+    "BATCH_SIZE": 1024,       # Adjusted for stability
+    "EPOCHS": 100,            # 100 is usually sufficient with early stopping
+    "LR": 1e-4,               # Lower LR for Transformer stability
     "STRIDE": 1,              # Sample every single day
-    "DATA_DIR": "data_sp500_v4",
-    "MODEL_DIR": "models_sp500_v4",
+    "DATA_DIR": "data_sp500_v5",
+    "MODEL_DIR": "models_sp500_v5",
 }
 
 os.makedirs(f"{CONFIG['DATA_DIR']}/raw", exist_ok=True)
@@ -52,6 +51,7 @@ os.makedirs(f"{CONFIG['DATA_DIR']}/processed", exist_ok=True)
 os.makedirs(CONFIG['MODEL_DIR'], exist_ok=True)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"🚀 DEVICE: {device}")
 
 # ==========================================
 # 1. MATH & FEATURES
@@ -98,18 +98,27 @@ class FinancialMath:
 # ==========================================
 # 2. NEURAL NETWORK ARCHITECTURE
 # ==========================================
-class QuantileLoss(nn.Module):
-    def __init__(self, quantiles=[0.1, 0.5, 0.9]):
+class WeightedQuantileLoss(nn.Module):
+    def __init__(self, quantiles=[0.1, 0.5, 0.9], weights=[1.0, 0.8, 0.5, 0.2]):
         super().__init__()
         self.quantiles = quantiles
+        self.weights = torch.tensor(weights).to(device)
 
     def forward(self, preds, target):
+        # preds: [Batch, 4, 3]
+        # target: [Batch, 4]
         loss = 0
-        target = target.unsqueeze(-1)
+        target = target.unsqueeze(-1) # [Batch, 4, 1]
+        
+        # Calculate loss for each horizon
         for i, q in enumerate(self.quantiles):
             errors = target - preds[:, :, i].unsqueeze(-1)
-            loss += torch.max((q - 1) * errors, q * errors).mean()
-        return loss
+            q_loss = torch.max((q - 1) * errors, q * errors) # [Batch, 4, 1]
+            loss += q_loss.mean(dim=0).squeeze() # [4] (Average over batch)
+            
+        # Weighted sum across horizons (Day > Week > Month > Year)
+        # We sum the quantile losses (3 values) then weight by horizon
+        return (loss * self.weights).sum()
 
 class MultiHorizonTransformer(nn.Module):
     def __init__(self, num_features, d_model, nhead, num_layers, dropout):
@@ -120,6 +129,7 @@ class MultiHorizonTransformer(nn.Module):
         self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers)
         
         # 4 Heads: Day, Week, Month, Year
+        # Output 3 values per head (Bear, Median, Bull)
         self.head_day = nn.Sequential(nn.Linear(d_model, 64), nn.GELU(), nn.Linear(64, 3))
         self.head_week = nn.Sequential(nn.Linear(d_model, 64), nn.GELU(), nn.Linear(64, 3))
         self.head_month = nn.Sequential(nn.Linear(d_model, 64), nn.GELU(), nn.Linear(64, 3))
@@ -137,58 +147,16 @@ class MultiHorizonTransformer(nn.Module):
             self.head_year(current_state)
         ], dim=1)
 
-class BigDataset(Dataset):
-    def __init__(self, x_path, y_path):
-        self.X = np.load(x_path, mmap_mode='r')
-        self.Y = np.load(y_path, mmap_mode='r')
+class PreloadedDataset(Dataset):
+    def __init__(self, x_data, y_data):
+        self.X = torch.tensor(x_data, dtype=torch.float32)
+        self.Y = torch.tensor(y_data, dtype=torch.float32)
     def __len__(self): return len(self.X)
     def __getitem__(self, idx):
-        return torch.tensor(self.X[idx], dtype=torch.float32), torch.tensor(self.Y[idx], dtype=torch.float32)
+        return self.X[idx], self.Y[idx]
 
 # ==========================================
-# 3. ADVANCED LOGGING (THE WATCHER)
-# ==========================================
-class TrainingWatcher:
-    def __init__(self, filepath):
-        self.filepath = filepath
-        
-        # Dynamic Column Generation
-        base_cols = ["Epoch", "Train_Loss", "Val_Loss"]
-        horizons = ["1D", "1W", "1M", "1Y"]
-        metrics = ["Real", "Bear", "Med", "Bull"] # Real = Ground Truth
-        
-        # Generates: 1D_Real, 1D_Bear, 1D_Med, 1D_Bull, 1W_Real...
-        csv_cols = base_cols + [f"{h}_{m}" for h in horizons for m in metrics]
-        
-        with open(self.filepath, "w") as f:
-            f.write(",".join(csv_cols) + "\n")
-            
-    def log(self, epoch, train_loss, val_loss, preds, true_targets, ref_price=100.0):
-        """
-        Logs the specific performance on the Watcher Sample.
-        All prices are normalized to start at $100.00 for easy percentage comparison.
-        """
-        row = [f"{epoch}", f"{train_loss:.5f}", f"{val_loss:.5f}"]
-        
-        # Loop through horizons: 0=1D, 1=1W, 2=1M, 3=1Y
-        for i in range(4):
-            # 1. Calculate Real Price (Ground Truth)
-            # Y contains Log Returns. P_real = $100 * exp(True_Log_Return)
-            real_p = ref_price * np.exp(true_targets[i])
-            
-            # 2. Calculate Model Cone
-            bear_p = ref_price * np.exp(preds[i][0])
-            med_p  = ref_price * np.exp(preds[i][1])
-            bull_p = ref_price * np.exp(preds[i][2])
-            
-            # 3. Add to row
-            row.extend([f"{real_p:.2f}", f"{bear_p:.2f}", f"{med_p:.2f}", f"{bull_p:.2f}"])
-            
-        with open(self.filepath, "a") as f:
-            f.write(",".join(row) + "\n")
-
-# ==========================================
-# 4. PIPELINE PHASES
+# 3. PIPELINE PHASES
 # ==========================================
 
 def phase_1_download():
@@ -208,9 +176,7 @@ def phase_1_download():
     for i in range(0, len(tickers), chunk_size):
         batch = tickers[i:i+chunk_size]
         try:
-            # Download 20 years of data
             data = yf.download(batch, start="2000-01-01", progress=False, group_by='ticker', auto_adjust=True, threads=True)
-            
             for t in batch:
                 try:
                     if len(batch) > 1:
@@ -225,16 +191,18 @@ def phase_1_download():
                         df.to_parquet(f"{CONFIG['DATA_DIR']}/raw/{t}.parquet")
                 except: continue
         except: time.sleep(1)
-    
     print("   ✅ Data Download Complete.")
 
-def phase_2_process():
-    print("\n⚙️ PHASE 2: DEEP FEATURE ENGINEERING")
-    files = glob.glob(f"{CONFIG['DATA_DIR']}/raw/*.parquet")
-    scaler = RobustScaler()
-    X_buffer, Y_buffer = [], []
+def phase_2_process_corrected():
+    print("\n⚙️ PHASE 2: PROCESSING & CHRONOLOGICAL SPLITTING")
     
-    print(f"   Processing {len(files)} files with STRIDE={CONFIG['STRIDE']} (Max Density)...")
+    files = glob.glob(f"{CONFIG['DATA_DIR']}/raw/*.parquet")
+    
+    # Lists to hold data BEFORE concatenation
+    train_X_list, train_Y_list = [], []
+    val_X_list, val_Y_list = [], []
+    
+    print(f"   Processing {len(files)} files...")
     
     for f in tqdm(files):
         try:
@@ -250,37 +218,39 @@ def phase_2_process():
             df['MACD'] = FinancialMath.get_macd(df['Close']) / (df['Close'] + 1e-8)
             df['ATR'] = FinancialMath.get_atr(df['High'], df['Low'], df['Close']) / (df['Close'] + 1e-8)
             
-            # --- Long Term Memory Features ---
-            df['SMA_200'] = df['Close'].rolling(200).mean()
-            df['Dist_SMA200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
-            
-            df['Rolling_Max'] = df['Close'].expanding().max()
-            df['Dist_ATH'] = (df['Close'] - df['Rolling_Max']) / df['Rolling_Max']
-            
-            df['Vol_1Y'] = df['Log_Ret'].rolling(252).std()
-
             df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
             
-            # Feature Cols
-            feature_cols = ['Log_Ret', 'Vol_Norm', 'H-L', 'RSI', 'MACD', 'ATR', 'Dist_SMA200', 'Dist_ATH', 'Vol_1Y']
-            data_tech = df[feature_cols].values
-            data_close = df['Close'].values
+            # Feature Cols (6 features)
+            feature_cols = ['Log_Ret', 'Vol_Norm', 'H-L', 'RSI', 'MACD', 'ATR']
+            data_tech = df[feature_cols].values.astype(np.float32)
+            data_close = df['Close'].values.astype(np.float32)
             
-            # Placeholder Fundamentals
-            fund_vec = [20.0, 3.0, 0.5, 0.15, 25.0, 1.0] 
+            # Fake Fundamentals (6 features)
+            fund_vec = np.array([20.0, 3.0, 0.5, 0.15, 25.0, 1.0], dtype=np.float32)
             
             L = CONFIG['LOOKBACK']
+            # Limit so we can have targets for 1 Year out (252 days)
             limit = len(df) - 252 
+            
+            # Temp storage for this ticker
+            ticker_X = []
+            ticker_Y = []
             
             # --- SLICING LOOP ---
             for i in range(L, limit, CONFIG['STRIDE']):
                 
                 # Inputs
-                tech_win = data_tech[i-L : i]
+                tech_win = data_tech[i-L : i] # (L, 6)
+                
+                # FFT on Price (Calculated per window to avoid lookahead)
                 price_win = data_close[i-L : i]
                 energies = FinancialMath.get_fft_energy(price_win, top_k=3)
-                fft_win = np.tile(energies, (L, 1))
-                fund_win = np.tile(fund_vec, (L, 1))
+                fft_win = np.tile(energies, (L, 1)).astype(np.float32) # (L, 3)
+                
+                # Fundamentals
+                fund_win = np.tile(fund_vec, (L, 1)).astype(np.float32) # (L, 6)
+                
+                # Concatenate: 6 + 3 + 6 = 15 Features
                 full_win = np.concatenate([tech_win, fft_win, fund_win], axis=1)
                 
                 # Targets (Log Returns)
@@ -290,68 +260,110 @@ def phase_2_process():
                 t_1m = np.log(data_close[i+20] / p_cur)
                 t_1y = np.log(data_close[i+251] / p_cur)
                 
-                X_buffer.append(full_win)
-                Y_buffer.append([t_1d, t_1w, t_1m, t_1y])
+                ticker_X.append(full_win)
+                ticker_Y.append([t_1d, t_1w, t_1m, t_1y])
+            
+            # --- CHRONOLOGICAL SPLIT PER TICKER ---
+            # 90% Training, 10% Validation (Validation is strictly the end of the chart)
+            if len(ticker_X) > 10:
+                split_idx = int(len(ticker_X) * 0.90)
+                
+                train_X_list.append(np.array(ticker_X[:split_idx]))
+                train_Y_list.append(np.array(ticker_Y[:split_idx]))
+                
+                val_X_list.append(np.array(ticker_X[split_idx:]))
+                val_Y_list.append(np.array(ticker_Y[split_idx:]))
 
-        except Exception: continue
+        except Exception as e:
+            continue
 
-    if len(X_buffer) == 0: return False
+    if len(train_X_list) == 0: 
+        print("❌ No data processed.")
+        return False
 
-    print("   Concatenating & Scaling...")
-    X_final = np.array(X_buffer, dtype=np.float32)
-    Y_final = np.array(Y_buffer, dtype=np.float32)
+    print("   Merging data arrays...")
+    X_train = np.concatenate(train_X_list, axis=0)
+    Y_train = np.concatenate(train_Y_list, axis=0)
+    X_val = np.concatenate(val_X_list, axis=0)
+    Y_val = np.concatenate(val_Y_list, axis=0)
     
-    N, L, F = X_final.shape
-    X_flat = X_final.reshape(-1, F)
-    X_scaled = scaler.fit_transform(X_flat).reshape(N, L, F)
+    print(f"   Training Samples: {len(X_train)}")
+    print(f"   Validation Samples: {len(X_val)}")
     
-    np.save(f"{CONFIG['DATA_DIR']}/processed/X.npy", X_scaled)
-    np.save(f"{CONFIG['DATA_DIR']}/processed/Y.npy", Y_final)
+    # --- FIT SCALER ON TRAIN ONLY ---
+    print("   Fitting Scaler (No Leakage)...")
+    scaler = RobustScaler()
+    N_t, L, F = X_train.shape
+    
+    # Flatten -> Fit -> Transform
+    X_train_flat = X_train.reshape(-1, F)
+    scaler.fit(X_train_flat)
+    X_train_scaled = scaler.transform(X_train_flat).reshape(N_t, L, F)
+    
+    # Transform Validation using Train stats
+    N_v, _, _ = X_val.shape
+    X_val_flat = X_val.reshape(-1, F)
+    X_val_scaled = scaler.transform(X_val_flat).reshape(N_v, L, F)
+    
+    # Save
+    print("   Saving processed files...")
+    np.save(f"{CONFIG['DATA_DIR']}/processed/X_train.npy", X_train_scaled)
+    np.save(f"{CONFIG['DATA_DIR']}/processed/Y_train.npy", Y_train)
+    np.save(f"{CONFIG['DATA_DIR']}/processed/X_val.npy", X_val_scaled)
+    np.save(f"{CONFIG['DATA_DIR']}/processed/Y_val.npy", Y_val)
+    
     joblib.dump(scaler, f"{CONFIG['MODEL_DIR']}/scaler.pkl")
     
-    print(f"✅ Saved {N} samples.")
+    print("✅ Data Processing Complete.")
     return True
 
 def phase_3_train():
     print(f"\n🔥 PHASE 3: TRAINING ({CONFIG['EPOCHS']} EPOCHS)")
     
-    # Load Data
-    ds = BigDataset(f"{CONFIG['DATA_DIR']}/processed/X.npy", f"{CONFIG['DATA_DIR']}/processed/Y.npy")
-    train_len = int(0.9 * len(ds))
-    val_len = len(ds) - train_len
-    train_ds, val_ds = torch.utils.data.random_split(ds, [train_len, val_len])
+    # Load separate files
+    print("   Loading Datasets...")
+    X_train = np.load(f"{CONFIG['DATA_DIR']}/processed/X_train.npy")
+    Y_train = np.load(f"{CONFIG['DATA_DIR']}/processed/Y_train.npy")
+    X_val = np.load(f"{CONFIG['DATA_DIR']}/processed/X_val.npy")
+    Y_val = np.load(f"{CONFIG['DATA_DIR']}/processed/Y_val.npy")
     
+    train_ds = PreloadedDataset(X_train, Y_train)
+    val_ds = PreloadedDataset(X_val, Y_val)
+    
+    # SHUFFLE TRAIN = OK (because validation is chronologically separated)
     train_loader = DataLoader(train_ds, batch_size=CONFIG['BATCH_SIZE'], shuffle=True, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=CONFIG['BATCH_SIZE'])
+    # SHUFFLE VAL = FALSE (keep order for visualization/logic)
+    val_loader = DataLoader(val_ds, batch_size=CONFIG['BATCH_SIZE'], shuffle=False)
     
-    # Init Model
-    model = MultiHorizonTransformer(CONFIG['FEATURES'], CONFIG['HIDDEN_DIM'], CONFIG['HEADS'], CONFIG['LAYERS'], CONFIG['DROPOUT']).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['LR'])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
-    loss_fn = QuantileLoss()
+    model = MultiHorizonTransformer(
+        CONFIG['FEATURES'], 
+        CONFIG['HIDDEN_DIM'], 
+        CONFIG['HEADS'], 
+        CONFIG['LAYERS'], 
+        CONFIG['DROPOUT']
+    ).to(device)
     
-    # Init Logger
-    watcher = TrainingWatcher(f"{CONFIG['MODEL_DIR']}/training_log.csv")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['LR'], weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
     
-    # --- SETUP WATCHER SAMPLE ---
-    # We grab the first sample from validation to "watch" deeply
-    # watch_x = Input features, watch_y = True future returns
-    watch_x, watch_y = val_ds[0]
-    watch_x = watch_x.unsqueeze(0).to(device)
-    watch_y_np = watch_y.numpy() # Move truth to CPU for logging
+    # Weighted loss to balance 1D vs 1Y importance
+    loss_fn = WeightedQuantileLoss()
     
     best_loss = float('inf')
     early_stop_counter = 0
-    patience_limit = 20  # Increased patience for long training
+    patience = 10
     
-    print(f"   📝 Detailed logging active: {CONFIG['MODEL_DIR']}/training_log.csv")
+    # Watcher Sample (First element of validation set)
+    watch_x, watch_y = val_ds[0]
+    watch_x = watch_x.unsqueeze(0).to(device)
+    watch_y = watch_y.numpy()
 
     for epoch in range(CONFIG['EPOCHS']):
         model.train()
         train_loss = 0
         steps = 0
         
-        pbar = tqdm(train_loader, desc=f"Ep {epoch+1}")
+        pbar = tqdm(train_loader, desc=f"Ep {epoch+1}/{CONFIG['EPOCHS']}")
         for bx, by in pbar:
             bx, by = bx.to(device), by.to(device)
             optimizer.zero_grad()
@@ -373,35 +385,30 @@ def phase_3_train():
                 bx, by = bx.to(device), by.to(device)
                 val_loss += loss_fn(model(bx), by).item()
                 val_steps += 1
-            
-            # --- LOGGING ---
-            # Predict on the specific watcher sample
+                
+            # Quick visual check on watcher
             w_out = model(watch_x).cpu().numpy()[0]
-            
-            # Log Real vs Predicted for all 4 horizons
-            watcher.log(
-                epoch=epoch+1, 
-                train_loss=train_loss/steps, 
-                val_loss=val_loss/val_steps, 
-                preds=w_out, 
-                true_targets=watch_y_np, 
-                ref_price=100.0
-            )
+            # Print 1M (Index 2) prediction vs reality
+            # w_out shape: [4 horizons, 3 quantiles]
+            # bear, med, bull
+            real_1m = np.exp(watch_y[2]) * 100
+            pred_1m = np.exp(w_out[2][1]) * 100
+            # print(f"      [WATCHER 1M] Real: ${real_1m:.2f} | Pred: ${pred_1m:.2f}")
 
         avg_val = val_loss / val_steps
         scheduler.step(avg_val)
         
         print(f"      Val Loss: {avg_val:.5f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
 
-        # Checkpoint
         if avg_val < best_loss:
             best_loss = avg_val
             early_stop_counter = 0
             torch.save(model.state_dict(), f"{CONFIG['MODEL_DIR']}/best_model.pth")
+            print("      💾 Model Saved.")
         else:
             early_stop_counter += 1
-            if early_stop_counter >= patience_limit:
-                print(f"🛑 Early stopping triggered at epoch {epoch+1}")
+            if early_stop_counter >= patience:
+                print(f"🛑 Early stopping at epoch {epoch+1}")
                 break
 
     print("✅ Training Complete.")
@@ -413,78 +420,85 @@ def predict_full_cones(ticker):
     model = MultiHorizonTransformer(CONFIG['FEATURES'], CONFIG['HIDDEN_DIM'], CONFIG['HEADS'], CONFIG['LAYERS'], CONFIG['DROPOUT']).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
+    
+    # Load Scaler
     scaler = joblib.load(f"{CONFIG['MODEL_DIR']}/scaler.pkl")
     
     print(f"\n🔮 PREDICTING FOR: {ticker}")
-    df = yf.download(ticker, period="5y", progress=False, auto_adjust=True)
-    
-    if isinstance(df.columns, pd.MultiIndex):
-        try: df = df.xs(ticker, axis=1, level=1)
-        except: df.columns = df.columns.droplevel(1)
+    try:
+        df = yf.download(ticker, period="5y", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            try: df = df.xs(ticker, axis=1, level=1)
+            except: df.columns = df.columns.droplevel(1)
             
-    # Re-Engineer Features
-    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
-    df['Vol_Norm'] = (df['Volume'] - df['Volume'].rolling(20).mean()) / (df['Volume'].rolling(20).std() + 1e-8)
-    df['H-L'] = (df['High'] - df['Low']) / df['Close']
-    df['RSI'] = FinancialMath.get_rsi(df['Close']) / 100.0
-    df['MACD'] = FinancialMath.get_macd(df['Close']) / (df['Close'] + 1e-8)
-    df['ATR'] = FinancialMath.get_atr(df['High'], df['Low'], df['Close']) / (df['Close'] + 1e-8)
-    df['SMA_200'] = df['Close'].rolling(200).mean()
-    df['Dist_SMA200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
-    df['Rolling_Max'] = df['Close'].expanding().max()
-    df['Dist_ATH'] = (df['Close'] - df['Rolling_Max']) / df['Rolling_Max']
-    df['Vol_1Y'] = df['Log_Ret'].rolling(252).std()
-    
-    df = df.fillna(0)
-    
-    if len(df) < CONFIG['LOOKBACK']: return "Insufficient Data"
-
-    # Extract Window
-    feature_cols = ['Log_Ret', 'Vol_Norm', 'H-L', 'RSI', 'MACD', 'ATR', 'Dist_SMA200', 'Dist_ATH', 'Vol_1Y']
-    tech_win = df[feature_cols].values[-CONFIG['LOOKBACK']:]
-    
-    price_win = df['Close'].values[-CONFIG['LOOKBACK']:]
-    energies = FinancialMath.get_fft_energy(price_win, top_k=3)
-    fft_win = np.tile(energies, (CONFIG['LOOKBACK'], 1))
-    fund_win = np.tile([20,3,0.5,0.15,25,1], (CONFIG['LOOKBACK'], 1))
-    
-    X_raw = np.concatenate([tech_win, fft_win, fund_win], axis=1)
-    X_scaled = scaler.transform(X_raw.reshape(-1, CONFIG['FEATURES'])).reshape(1, CONFIG['LOOKBACK'], CONFIG['FEATURES'])
-    
-    with torch.no_grad():
-        preds = model(torch.tensor(X_scaled, dtype=torch.float32).to(device)).cpu().numpy()[0]
+        # Feature Engineering (Must match Phase 2)
+        df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+        df['Vol_Norm'] = (df['Volume'] - df['Volume'].rolling(20).mean()) / (df['Volume'].rolling(20).std() + 1e-8)
+        df['H-L'] = (df['High'] - df['Low']) / df['Close']
+        df['RSI'] = FinancialMath.get_rsi(df['Close']) / 100.0
+        df['MACD'] = FinancialMath.get_macd(df['Close']) / (df['Close'] + 1e-8)
+        df['ATR'] = FinancialMath.get_atr(df['High'], df['Low'], df['Close']) / (df['Close'] + 1e-8)
         
-    curr = df['Close'].iloc[-1]
-    
-    print("-" * 65)
-    print(f"📊 {ticker} | CURRENT: ${curr:.2f}")
-    print("-" * 65)
-    print(f"{'HORIZON':<10} | {'BEAR':<12} | {'MEDIAN':<12} | {'BULL':<12} | {'SPREAD':<10}")
-    print("-" * 65)
-    
-    horizons = ["1 Day", "1 Week", "1 Month", "1 Year"]
-    for i, h in enumerate(horizons):
-        bear = curr * np.exp(preds[i][0])
-        med  = curr * np.exp(preds[i][1])
-        bull = curr * np.exp(preds[i][2])
-        spread = ((bull - bear) / med) * 100
-        print(f"{h:<10} | ${bear:<11.2f} | ${med:<11.2f} | ${bull:<11.2f} | {spread:.1f}%")
-    print("-" * 65)
+        df = df.fillna(0)
+        
+        if len(df) < CONFIG['LOOKBACK']: 
+            print("Insufficient data.")
+            return
+
+        # Prepare Window
+        feature_cols = ['Log_Ret', 'Vol_Norm', 'H-L', 'RSI', 'MACD', 'ATR']
+        tech_win = df[feature_cols].values[-CONFIG['LOOKBACK']:].astype(np.float32)
+        
+        price_win = df['Close'].values[-CONFIG['LOOKBACK']:]
+        energies = FinancialMath.get_fft_energy(price_win, top_k=3)
+        fft_win = np.tile(energies, (CONFIG['LOOKBACK'], 1)).astype(np.float32)
+        
+        fund_vec = np.array([20,3,0.5,0.15,25,1], dtype=np.float32)
+        fund_win = np.tile(fund_vec, (CONFIG['LOOKBACK'], 1))
+        
+        X_raw = np.concatenate([tech_win, fft_win, fund_win], axis=1)
+        
+        # Scale
+        X_flat = X_raw.reshape(-1, CONFIG['FEATURES'])
+        X_scaled = scaler.transform(X_flat).reshape(1, CONFIG['LOOKBACK'], CONFIG['FEATURES'])
+        
+        with torch.no_grad():
+            preds = model(torch.tensor(X_scaled).to(device)).cpu().numpy()[0]
+            
+        curr = df['Close'].iloc[-1]
+        
+        print("-" * 65)
+        print(f"📊 {ticker} | CURRENT: ${curr:.2f}")
+        print("-" * 65)
+        print(f"{'HORIZON':<10} | {'BEAR':<12} | {'MEDIAN':<12} | {'BULL':<12} | {'SPREAD':<10}")
+        print("-" * 65)
+        
+        horizons = ["1 Day", "1 Week", "1 Month", "1 Year"]
+        for i, h in enumerate(horizons):
+            bear = curr * np.exp(preds[i][0])
+            med  = curr * np.exp(preds[i][1])
+            bull = curr * np.exp(preds[i][2])
+            spread = ((bull - bear) / med) * 100
+            print(f"{h:<10} | ${bear:<11.2f} | ${med:<11.2f} | ${bull:<11.2f} | {spread:.1f}%")
+        print("-" * 65)
+        
+    except Exception as e:
+        print(f"Prediction error: {e}")
 
 # ==========================================
-# 5. EXECUTION
+# 4. EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    print(f"🤖 AGENT V4 REBOOT | Context: 1 Year ({CONFIG['LOOKBACK']} days)")
+    print(f"🤖 AGENT V5 (STRICT CHRONOLOGICAL SPLIT) | Context: {CONFIG['LOOKBACK']} days")
     
     # 1. Check/Download
     raw_files = glob.glob(f"{CONFIG['DATA_DIR']}/raw/*.parquet")
     if len(raw_files) < 10:
         phase_1_download()
         
-    # 2. Process
-    if not os.path.exists(f"{CONFIG['DATA_DIR']}/processed/X.npy"):
-        phase_2_process()
+    # 2. Process (Force re-run if safe files don't exist)
+    if not os.path.exists(f"{CONFIG['DATA_DIR']}/processed/X_train.npy"):
+        phase_2_process_corrected()
     
     # 3. Train
     phase_3_train()
